@@ -1,206 +1,219 @@
-#!/usr/bin/env bash
-# Umami Docker 一键部署脚本（wget 可直接执行）
-# 系统需已有 docker & docker compose
+#!/bin/bash
 
-set -euo pipefail
+# 颜色定义
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[0;33m'
+SKYBLUE='\033[0;36m'
+PLAIN='\033[0m'
 
-UMAMI_DIR="/opt/umami-docker"
-COMPOSE_FILE="${UMAMI_DIR}/docker-compose.yml"
-CONFIG_FILE="/etc/umami-docker.conf"
-UMAMI_PORT=3000
+# 默认安装目录
+DEFAULT_INSTALL_PATH="/opt/umami"
 
-###############################################
-# 工具函数
-###############################################
-require_root() {
-  if [[ "$EUID" -ne 0 ]]; then
-    echo "❌ 请使用 root 或 sudo 运行脚本"
-    exit 1
-  fi
+# 检查是否为 Root 用户
+check_root() {
+    if [ "$EUID" -ne 0 ]; then
+        echo -e "${RED}请使用 root 权限运行此脚本！${PLAIN}"
+        exit 1
+    fi
 }
 
-pause() {
-  echo
-  read -rp "👉 按回车继续..." _
+# 检查并安装 Docker
+check_docker() {
+    if ! command -v docker &> /dev/null; then
+        echo -e "${YELLOW}检测到未安装 Docker，正在为您安装...${PLAIN}"
+        curl -fsSL https://get.docker.com | bash
+        systemctl enable docker
+        systemctl start docker
+        echo -e "${GREEN}Docker 安装完成！${PLAIN}"
+    else
+        echo -e "${GREEN}Docker 已安装。${PLAIN}"
+    fi
+
+    if ! docker compose version &> /dev/null; then
+        echo -e "${YELLOW}检测到 Docker Compose 插件未安装或版本过旧，尝试安装插件...${PLAIN}"
+        apt-get update && apt-get install docker-compose-plugin -y || yum install docker-compose-plugin -y
+    fi
 }
 
-print_header() {
-  clear
-  echo "===================================================="
-  echo "           Umami Docker 一键管理脚本"
-  echo "===================================================="
-  echo
+# 获取公网 IP (用于显示登录信息)
+get_public_ip() {
+    curl -s https://api.ipify.org
 }
 
-get_ip() {
-  ip=$(hostname -I | awk '{print $1}')
-  [[ -z "$ip" ]] && ip="localhost"
-  echo "$ip"
+# 生成随机 APP_SECRET
+generate_secret() {
+    openssl rand -hex 32
 }
 
-###############################################
-# 配置加载 / 创建
-###############################################
-load_or_create_config() {
-  if [[ -f "$CONFIG_FILE" ]]; then
-    . "$CONFIG_FILE"
-  else
-    DB_PASSWORD=$(tr -dc A-Za-z0-9 </dev/urandom | head -c 20)
-    cat > "$CONFIG_FILE" <<EOF
-DB_PASSWORD="$DB_PASSWORD"
-UMAMI_PORT="$UMAMI_PORT"
-EOF
-    chmod 600 "$CONFIG_FILE"
-  fi
-}
+# 安装 Umami
+install_umami() {
+    check_docker
 
-###############################################
-# 生成 docker-compose.yml
-###############################################
-generate_compose_file() {
-  mkdir -p "$UMAMI_DIR"
+    echo -e "${SKYBLUE}准备安装 Umami...${PLAIN}"
+    read -p "请输入安装路径 (默认: $DEFAULT_INSTALL_PATH): " INSTALL_PATH
+    INSTALL_PATH=${INSTALL_PATH:-$DEFAULT_INSTALL_PATH}
 
-cat > "$COMPOSE_FILE" <<EOF
-version: '3.9'
+    if [ -d "$INSTALL_PATH" ]; then
+        echo -e "${RED}目录 $INSTALL_PATH 已存在，请检查是否已安装或更换路径。${PLAIN}"
+        return
+    fi
 
+    read -p "请输入 Umami 运行端口 (默认: 3000): " UMAMI_PORT
+    UMAMI_PORT=${UMAMI_PORT:-3000}
+
+    mkdir -p "$INSTALL_PATH"
+    cd "$INSTALL_PATH" || exit
+
+    APP_SECRET=$(generate_secret)
+
+    # 创建 docker-compose.yml
+    cat > docker-compose.yml <<EOF
+version: '3.8'
 services:
-  umami-db:
-    image: postgres:15
-    restart: always
-    environment:
-      POSTGRES_DB: umami
-      POSTGRES_USER: umami
-      POSTGRES_PASSWORD: ${DB_PASSWORD}
-    volumes:
-      - umami-db-data:/var/lib/postgresql/data
-
   umami:
-    image: ghcr.io/umami-software/umami:postgresql-latest
-    restart: always
+    image: docker.umami.is/umami-software/umami:latest
+    container_name: umami
+    network_mode: "bridge"
+    environment:
+      DATABASE_URL: postgresql://umami:umami@db:5432/umami
+      DATABASE_TYPE: postgresql
+      APP_SECRET: ${APP_SECRET}
     ports:
       - "${UMAMI_PORT}:3000"
     depends_on:
-      - umami-db
+      db:
+        condition: service_healthy
+    restart: always
+    healthcheck:
+      test: ["CMD-SHELL", "wget --spider http://localhost:3000/api/heartbeat || exit 1"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  db:
+    image: postgres:15-alpine
+    container_name: umami-db
+    network_mode: "bridge"
     environment:
-      DATABASE_URL: postgresql://umami:${DB_PASSWORD}@umami-db:5432/umami
-
-volumes:
-  umami-db-data:
+      POSTGRES_DB: umami
+      POSTGRES_USER: umami
+      POSTGRES_PASSWORD: umami
+    volumes:
+      - ./data/postgres:/var/lib/postgresql/data
+    restart: always
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U umami -d umami"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
 EOF
+
+    echo -e "${YELLOW}正在拉取镜像并启动容器，这可能需要几分钟...${PLAIN}"
+    docker compose up -d
+
+    if [ $? -eq 0 ]; then
+        PUBLIC_IP=$(get_public_ip)
+        echo -e "\n${GREEN}==========================================${PLAIN}"
+        echo -e "${GREEN}       Umami 安装成功！${PLAIN}"
+        echo -e "${GREEN}==========================================${PLAIN}"
+        echo -e "访问地址: ${SKYBLUE}http://${PUBLIC_IP}:${UMAMI_PORT}${PLAIN}"
+        echo -e "默认用户: ${SKYBLUE}admin${PLAIN}"
+        echo -e "默认密码: ${SKYBLUE}umami${PLAIN}"
+        echo -e "${YELLOW}请登录后立即修改默认密码！${PLAIN}"
+        echo -e "${GREEN}==========================================${PLAIN}"
+    else
+        echo -e "${RED}安装失败，请检查 Docker 日志。${PLAIN}"
+    fi
 }
 
-###############################################
-# 安装 Umami
-###############################################
-install_umami() {
-  print_header
-  echo "📦 正在部署 Umami（Docker 模式）..."
-
-  generate_compose_file
-
-  cd "$UMAMI_DIR"
-  docker compose pull
-  docker compose up -d
-
-  ip=$(get_ip)
-
-  echo
-  echo "🎉 安装完成！"
-  echo "📍 访问地址： http://${ip}:${UMAMI_PORT}"
-  echo "🔐 默认账号：admin"
-  echo "🔐 默认密码：umami"
-  echo
-
-  pause
-}
-
-###############################################
 # 更新 Umami
-###############################################
 update_umami() {
-  print_header
+    echo -e "${SKYBLUE}准备更新 Umami...${PLAIN}"
+    read -p "请输入安装路径 (默认: $DEFAULT_INSTALL_PATH): " INSTALL_PATH
+    INSTALL_PATH=${INSTALL_PATH:-$DEFAULT_INSTALL_PATH}
 
-  if [[ ! -f "$COMPOSE_FILE" ]]; then
-    echo "❌ 未检测到安装目录：$UMAMI_DIR"
-    pause
-    return
-  fi
+    if [ ! -d "$INSTALL_PATH" ]; then
+        echo -e "${RED}目录 $INSTALL_PATH 不存在，请检查路径。${PLAIN}"
+        return
+    fi
 
-  echo "⬆️ 正在更新 Umami 镜像..."
-  cd "$UMAMI_DIR"
-  docker compose pull
-  docker compose up -d --force-recreate
+    cd "$INSTALL_PATH" || exit
+    
+    echo -e "${YELLOW}正在拉取最新镜像...${PLAIN}"
+    docker compose pull
 
-  echo
-  echo "✅ 更新完成！"
-  pause
+    echo -e "${YELLOW}正在重新创建容器...${PLAIN}"
+    docker compose up -d --remove-orphans
+
+    echo -e "${YELLOW}正在清理旧镜像...${PLAIN}"
+    docker image prune -f
+
+    echo -e "${GREEN}Umami 更新完成！${PLAIN}"
 }
 
-###############################################
 # 卸载 Umami
-###############################################
 uninstall_umami() {
-  print_header
-  echo "⚠️ 卸载会删除所有数据！"
-  read -rp "输入 YES 继续卸载：" confirm
+    echo -e "${RED}警告：卸载操作将删除容器！${PLAIN}"
+    read -p "请输入安装路径 (默认: $DEFAULT_INSTALL_PATH): " INSTALL_PATH
+    INSTALL_PATH=${INSTALL_PATH:-$DEFAULT_INSTALL_PATH}
 
-  [[ "$confirm" != "YES" ]] && echo "取消卸载。" && return
+    if [ ! -d "$INSTALL_PATH" ]; then
+        echo -e "${RED}目录 $INSTALL_PATH 不存在，请检查路径。${PLAIN}"
+        return
+    fi
 
-  cd "$UMAMI_DIR" 2>/dev/null || true
+    cd "$INSTALL_PATH" || exit
 
-  echo "🛑 停止容器..."
-  docker compose down -v || true
+    echo -e "${YELLOW}正在停止并移除容器...${PLAIN}"
+    docker compose down
 
-  echo "🗑 删除目录..."
-  rm -rf "$UMAMI_DIR"
+    read -p "是否删除数据库数据文件？(y/n): " DELETE_DATA
+    if [[ "$DELETE_DATA" == "y" || "$DELETE_DATA" == "Y" ]]; then
+        cd ..
+        rm -rf "$INSTALL_PATH"
+        echo -e "${GREEN}数据文件已删除。${PLAIN}"
+    else
+        echo -e "${YELLOW}数据文件保留在 $INSTALL_PATH 目录中。${PLAIN}"
+    fi
 
-  echo "🧾 删除配置..."
-  rm -f "$CONFIG_FILE"
-
-  echo
-  echo "✅ 卸载完成！"
-  pause
+    echo -e "${GREEN}Umami 卸载完成。${PLAIN}"
 }
 
-###############################################
-# 清理缓存
-###############################################
-clean_cache() {
-  print_header
-  echo "🧹 正在清理 Docker 缓存..."
-  docker system prune -f || true
-  echo "✅ 清理完成"
-  pause
-}
-
-###############################################
 # 主菜单
-###############################################
-main_menu() {
-  require_root
-  load_or_create_config
+show_menu() {
+    clear
+    echo -e "${GREEN}==========================================${PLAIN}"
+    echo -e "${GREEN}       Umami 一键管理脚本${PLAIN}"
+    echo -e "${GREEN}==========================================${PLAIN}"
+    echo -e "${SKYBLUE}1.${PLAIN} 安装 Umami"
+    echo -e "${SKYBLUE}2.${PLAIN} 更新 Umami"
+    echo -e "${SKYBLUE}3.${PLAIN} 卸载 Umami"
+    echo -e "${SKYBLUE}0.${PLAIN} 退出脚本"
+    echo -e "${GREEN}==========================================${PLAIN}"
+    read -p "请输入选项 [0-3]: " choice
 
-  while true; do
-    print_header
-    echo "请选择操作："
-    echo
-    echo "  1) 安装 Umami"
-    echo "  2) 更新 Umami"
-    echo "  3) 卸载 Umami"
-    echo "  4) 清理缓存"
-    echo "  0) 退出"
-    echo
-    read -rp "请输入编号：" op
-
-    case "$op" in
-      1) install_umami ;;
-      2) update_umami ;;
-      3) uninstall_umami ;;
-      4) clean_cache ;;
-      0) exit 0 ;;
-      *) echo "❌ 输入错误，请重试"; sleep 1 ;;
+    case $choice in
+        1)
+            install_umami
+            ;;
+        2)
+            update_umami
+            ;;
+        3)
+            uninstall_umami
+            ;;
+        0)
+            exit 0
+            ;;
+        *)
+            echo -e "${RED}无效选项，请重新输入。${PLAIN}"
+            sleep 2
+            show_menu
+            ;;
     esac
-  done
 }
 
-main_menu
+# 运行主逻辑
+check_root
+show_menu
