@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # ==================================================
-# Umami 一键安装/更新管理脚本 (Docker Compose版)
+# Umami 一键安装/更新管理脚本 (修复版)
 # ==================================================
 
 # 颜色定义
@@ -16,62 +16,54 @@ NC='\033[0m'
 INSTALL_DIR="/opt/umami"
 UMAMI_IMAGE="docker.umami.is/umami-software/umami:latest"
 
+# 强制使用 bash 运行
+if [ -z "$BASH_VERSION" ]; then
+    exec /bin/bash "$0" "$@"
+fi
+
 # 检查 Root 权限
 if [ "$EUID" -ne 0 ]; then
   echo -e "${RED}错误：请使用 root 权限运行此脚本 (sudo ./umami_manager.sh)${NC}"
   exit 1
 fi
 
-# 检查 Docker 是否存在 (仅检查，不安装)
+# 检查 Docker
 check_docker() {
     if ! command -v docker &> /dev/null; then
-        echo -e "${RED}错误：未检测到 Docker！${NC}"
-        echo -e "请先自行安装 Docker 和 Docker Compose 后再运行此脚本。"
+        echo -e "${RED}错误：未检测到 Docker！请先安装 Docker。${NC}"
         exit 1
     fi
 }
 
-# 清理垃圾文件函数
+# 清理垃圾文件
 cleanup_junk() {
     echo -e "${BLUE}🧹 正在执行自动清理...${NC}"
-    
-    # 1. 清理 Docker 无用镜像 (Dangling images)
     docker image prune -f > /dev/null 2>&1
-    
-    # 2. 根据系统清理包管理器缓存
     if [ -f /etc/debian_version ]; then
-        # Debian/Ubuntu
         apt-get autoremove -y > /dev/null 2>&1
         apt-get clean > /dev/null 2>&1
     elif [ -f /etc/redhat-release ]; then
-        # CentOS/RHEL
         yum autoremove -y > /dev/null 2>&1
         yum clean all > /dev/null 2>&1
     fi
-    
     echo -e "${GREEN}✔ 清理完成！${NC}"
 }
 
 # 安装函数
 install_umami() {
     echo -e "${CYAN}=== 开始安装 Umami ===${NC}"
-
     if [ -d "$INSTALL_DIR" ]; then
-        echo -e "${RED}检测到目录 $INSTALL_DIR 已存在！${NC}"
-        echo -e "如果需要重新安装，请先删除该目录，或者选择 [2] 更新。"
-        read -p "按回车键返回主菜单..."
+        echo -e "${RED}目录 $INSTALL_DIR 已存在！请先删除或选择更新。${NC}"
         return
     fi
 
     mkdir -p "$INSTALL_DIR"
     cd "$INSTALL_DIR"
 
-    # 生成随机密码
-    echo -e "${YELLOW}生成安全密钥中...${NC}"
+    echo -e "${YELLOW}生成配置文件...${NC}"
     DB_PASSWORD=$(openssl rand -base64 12 | tr -dc 'a-zA-Z0-9')
     APP_SECRET=$(openssl rand -hex 32)
 
-    # 创建 .env
     cat > .env <<EOF
 DATABASE_URL=postgresql://umami:${DB_PASSWORD}@db:5432/umami
 APP_SECRET=${APP_SECRET}
@@ -80,7 +72,6 @@ POSTGRES_USER=umami
 POSTGRES_PASSWORD=${DB_PASSWORD}
 EOF
 
-    # 创建 docker-compose.yml
     cat > docker-compose.yml <<EOF
 version: '3'
 services:
@@ -100,7 +91,6 @@ services:
       interval: 30s
       timeout: 10s
       retries: 3
-
   db:
     image: postgres:15-alpine
     network_mode: "bridge"
@@ -118,88 +108,53 @@ services:
       retries: 5
 EOF
 
-    echo -e "${YELLOW}正在启动容器...${NC}"
+    echo -e "${YELLOW}启动容器...${NC}"
     docker compose up -d
-
     IP=$(curl -s ifconfig.me)
-    
-    # 执行清理
     cleanup_junk
-
-    echo -e "\n${GREEN}======================================${NC}"
-    echo -e "${GREEN}      Umami 安装成功！      ${NC}"
-    echo -e "${GREEN}======================================${NC}"
-    echo -e "访问地址: ${CYAN}http://${IP}:3000${NC}"
-    echo -e "默认用户: ${YELLOW}admin${NC}"
-    echo -e "默认密码: ${YELLOW}umami${NC}"
-    echo -e "配置文件: ${INSTALL_DIR}"
-    echo -e "数据库密码已保存至 .env 文件"
-    echo -e "--------------------------------------"
-    read -p "按回车键返回主菜单..."
+    echo -e "\n${GREEN}Umami 安装成功！访问: http://${IP}:3000 (admin/umami)${NC}"
 }
 
 # 更新函数
 update_umami() {
     echo -e "${CYAN}=== 开始更新 Umami ===${NC}"
-    
     if [ ! -d "$INSTALL_DIR" ]; then
-        echo -e "${RED}错误：未找到安装目录 $INSTALL_DIR${NC}"
-        echo -e "请先执行安装。"
-        read -p "按回车键返回主菜单..."
+        echo -e "${RED}未找到安装目录，无法更新。${NC}"
         return
     fi
-
     cd "$INSTALL_DIR"
-    
-    echo -e "${YELLOW}正在拉取最新镜像...${NC}"
     docker compose pull
-
-    echo -e "${YELLOW}正在重建容器...${NC}"
     docker compose up -d --remove-orphans
-
-    # 执行清理
     cleanup_junk
-
-    echo -e "\n${GREEN}✔ Umami 更新完成！${NC}"
-    read -p "按回车键返回主菜单..."
+    echo -e "\n${GREEN}✔ 更新完成！${NC}"
 }
 
-# 主菜单
+# 主菜单 (修复输入读取问题)
 show_menu() {
     clear
     echo -e "${BLUE}#############################################${NC}"
-    echo -e "${BLUE}#           Umami 管理脚本 (Docker)         #${NC}"
+    echo -e "${BLUE}#           Umami 管理脚本 (修复版)         #${NC}"
     echo -e "${BLUE}#############################################${NC}"
-    echo -e ""
-    echo -e "  ${GREEN}1.${NC} 安装 Umami (Install)"
-    echo -e "  ${GREEN}2.${NC} 更新 Umami (Update)"
-    echo -e "  ${RED}0.${NC} 退出脚本 (Exit)"
-    echo -e ""
+    echo -e "  ${GREEN}1.${NC} 安装 Umami"
+    echo -e "  ${GREEN}2.${NC} 更新 Umami"
+    echo -e "  ${RED}0.${NC} 退出"
     echo -e "---------------------------------------------"
-    check_docker
-    echo -e "Docker状态: ${GREEN}已安装${NC}"
-    echo -e "---------------------------------------------"
-    read -p "请输入选项 [0-2]: " choice
+    
+    # 强制从 tty 读取输入，防止死循环
+    if [ -t 0 ]; then
+        read -p "请输入选项 [0-2]: " choice
+    else
+        read -p "请输入选项 [0-2]: " choice < /dev/tty
+    fi
 
     case $choice in
-        1)
-            install_umami
-            ;;
-        2)
-            update_umami
-            ;;
-        0)
-            echo -e "退出脚本。"
-            exit 0
-            ;;
-        *)
-            echo -e "${RED}无效选项，请重新输入。${NC}"
-            sleep 1
-            ;;
+        1) install_umami; read -p "按回车继续..." ;;
+        2) update_umami; read -p "按回车继续..." ;;
+        0) exit 0 ;;
+        *) echo -e "${RED}无效选项${NC}"; sleep 1 ;;
     esac
 }
 
-# 循环显示菜单
 while true; do
     show_menu
 done
