@@ -1,21 +1,21 @@
 #!/usr/bin/env bash
-# Umami Docker 一键安装/更新/卸载脚本（不安装 docker，本地必须已有 docker & docker compose）
-# 用法： sudo ./umami-docker.sh
+# Umami Docker 一键部署脚本（可 wget 下载）
+# 不安装 docker，本机需已安装 docker & docker compose
+# 使用方式：sudo bash umami.sh
 
 set -euo pipefail
 
 UMAMI_DIR="/opt/umami-docker"
 COMPOSE_FILE="${UMAMI_DIR}/docker-compose.yml"
-UMAMI_PORT=3000
-DB_PASSWORD=""
 CONFIG_FILE="/etc/umami-docker.conf"
+UMAMI_PORT=3000
 
-############################################
-# 工具
-############################################
+###############################################
+# 工具函数
+###############################################
 require_root() {
   if [[ "$EUID" -ne 0 ]]; then
-    echo "❌ 请使用 root 或 sudo 运行本脚本"
+    echo "❌ 请使用 root 或 sudo 运行脚本"
     exit 1
   fi
 }
@@ -28,7 +28,7 @@ pause() {
 print_header() {
   clear
   echo "===================================================="
-  echo "            Umami Docker 一键管理脚本"
+  echo "           Umami Docker 一键管理脚本"
   echo "===================================================="
   echo
 }
@@ -39,6 +39,9 @@ get_ip() {
   echo "$ip"
 }
 
+###############################################
+# 配置加载/生成
+###############################################
 load_or_create_config() {
   if [[ -f "$CONFIG_FILE" ]]; then
     . "$CONFIG_FILE"
@@ -52,13 +55,13 @@ EOF
   fi
 }
 
-############################################
+###############################################
 # 生成 docker-compose.yml
-############################################
+###############################################
 generate_compose_file() {
-  mkdir -p "$UMAMI_DIR"
+mkdir -p "$UMAMI_DIR"
 
-  cat > "$COMPOSE_FILE" <<EOF
+cat > "$COMPOSE_FILE" <<EOF
 version: '3.9'
 
 services:
@@ -77,22 +80,23 @@ services:
     restart: always
     ports:
       - "${UMAMI_PORT}:3000"
-    environment:
-      DATABASE_URL: postgresql://umami:${DB_PASSWORD}@umami-db:5432/umami
     depends_on:
       - umami-db
+    environment:
+      DATABASE_URL: postgresql://umami:${DB_PASSWORD}@umami-db:5432/umami
 
 volumes:
   umami-db-data:
 EOF
 }
 
-############################################
-# 安装（启动容器）
-############################################
+
+###############################################
+# 安装
+###############################################
 install_umami() {
   print_header
-  echo "📦 正在创建 Umami Docker 环境..."
+  echo "📦 正在部署 Umami（Docker 模式）..."
   echo
 
   generate_compose_file
@@ -101,89 +105,88 @@ install_umami() {
   docker compose pull
   docker compose up -d
 
+  clear
   echo "🎉 安装完成！"
-  local ip=$(get_ip)
-
   echo
+
+  ip=$(get_ip)
   echo "📍 访问地址： http://${ip}:${UMAMI_PORT}"
-  echo "🔐 默认账号： admin"
-  echo "🔐 默认密码： umami"
+  echo "🔐 默认账号：admin"
+  echo "🔐 默认密码：umami"
   echo "（首次启动自动创建）"
   echo
 
   pause
 }
 
-############################################
-# 更新（重新拉镜像 + 重建）
-############################################
+###############################################
+# 更新
+###############################################
 update_umami() {
   print_header
 
   if [[ ! -f "$COMPOSE_FILE" ]]; then
-    echo "❌ 未检测到 Umami Docker 安装目录：$UMAMI_DIR"
+    echo "❌ 未检测到安装目录：$UMAMI_DIR"
     pause
     return
   fi
 
-  echo "⬆️ 正在更新镜像..."
+  echo "⬆️ 正在更新 Umami 镜像..."
   cd "$UMAMI_DIR"
   docker compose pull
   docker compose up -d --force-recreate
 
   echo
-  echo "✅ 更新完成！"
+  echo "✅ 更新成功！"
   pause
 }
 
-############################################
-# 卸载（删除容器 + 数据 + 文件）
-############################################
+###############################################
+# 卸载
+###############################################
 uninstall_umami() {
   print_header
-  echo "⚠️ 警告：卸载将删除数据库和所有数据！"
-  read -rp "输入 YES 继续卸载：" confirm
 
-  [[ "$confirm" != "YES" ]] && echo "取消卸载。" && return
+  echo "⚠️ 卸载将删除所有数据！"
+  read -rp "输入 YES 确认卸载：" confirm
+  [[ "$confirm" != "YES" ]] && echo "❌ 已取消" && return
 
-  cd "$UMAMI_DIR" 2>/dev/null || true
+  cd "$UMAMI_DIR" || true
 
-  echo "🛑 停止并删除容器..."
+  echo "🛑 停止容器..."
   docker compose down -v || true
 
   echo "🗑 删除目录：$UMAMI_DIR"
   rm -rf "$UMAMI_DIR"
 
-  echo "🧾 删除配置文件：$CONFIG_FILE"
+  echo "🧾 删除配置：$CONFIG_FILE"
   rm -f "$CONFIG_FILE"
 
   echo "✅ 卸载完成！"
   pause
 }
 
-############################################
-# 缓存清理
-############################################
+###############################################
+# 清理缓存
+###############################################
 clean_cache() {
   print_header
   echo "🧹 正在清理 Docker 缓存..."
-
   docker system prune -f || true
-
-  echo "✅ 清理完成。"
+  echo "✅ 完成！"
   pause
 }
 
-############################################
+###############################################
 # 主菜单
-############################################
+###############################################
 main_menu() {
   require_root
   load_or_create_config
 
   while true; do
     print_header
-    echo "请选择操作："
+    echo "请选择："
     echo
     echo "  1) 安装 Umami"
     echo "  2) 更新 Umami"
@@ -191,9 +194,9 @@ main_menu() {
     echo "  4) 清理缓存"
     echo "  0) 退出"
     echo
-    read -rp "请输入编号：" ch
+    read -rp "请输入编号：" op
 
-    case "$ch" in
+    case "$op" in
       1) install_umami ;;
       2) update_umami ;;
       3) uninstall_umami ;;
